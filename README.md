@@ -48,6 +48,23 @@ host.
 
 ## Commands
 
+For one-command experiments, use:
+
+```bash
+./platform scenario happy
+./platform scenario latch-unsafe
+./platform scenario latch-safe
+./platform scenario hot-partition
+./platform scenario balanced
+./platform scenario retry-dlt
+./platform scenario executor-unbounded
+./platform scenario executor-bounded
+./platform scenario spark
+./platform scenario airflow-spark
+```
+
+See `docs/scenario-guide.md` for expected output and side-by-side code paths.
+
 ```bash
 # Build and start everything
 ./platform up
@@ -91,6 +108,11 @@ host.
 - Consumer progress API: http://localhost:8082/api/consumer-progress
 - Spring health: http://localhost:8081/actuator/health
 - Kafka Connect API: http://localhost:8083/connectors
+- Airflow UI: http://localhost:8085 (`admin` / `admin`)
+
+The Spark/Airflow batch analytics milestone is explained in
+`docs/spark-airflow.md`. Spark reads the event-processing result from
+`processed_orders`; Airflow schedules and monitors the disposable Spark job.
 
 After `./platform test-csv`, open Kafka UI and inspect the
 `orders-cdc.public.orders` topic. Debezium creates one change event for each

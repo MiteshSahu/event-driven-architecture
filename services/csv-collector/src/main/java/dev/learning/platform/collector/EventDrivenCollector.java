@@ -15,7 +15,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 @Service
@@ -28,7 +27,7 @@ public class EventDrivenCollector {
     private final ExecutorService collectorWorkers;
     private final ExecutorService collectorCoordinators;
     private final ConcurrentHashMap<UUID, CollectorBatchState> batches = new ConcurrentHashMap<>();
-    private final boolean safeMode;
+    private final CollectorCompletionPolicy completionPolicy;
     private final long timeoutSeconds;
     private final long processingDelayMs;
     private final int maxAttempts;
@@ -37,6 +36,7 @@ public class EventDrivenCollector {
     public EventDrivenCollector(CsvFileProcessor fileProcessor,
             @Qualifier("collectorWorkers") ExecutorService collectorWorkers,
             @Qualifier("collectorCoordinators") ExecutorService collectorCoordinators,
+            List<CollectorCompletionPolicy> completionPolicies,
             @Value("${app.collector.mode:safe}") String mode,
             @Value("${app.collector.timeout-seconds:10}") long timeoutSeconds,
             @Value("${app.collector.processing-delay-ms:0}") long processingDelayMs,
@@ -45,13 +45,17 @@ public class EventDrivenCollector {
         this.fileProcessor = fileProcessor;
         this.collectorWorkers = collectorWorkers;
         this.collectorCoordinators = collectorCoordinators;
-        this.safeMode = "safe".equalsIgnoreCase(mode);
+        this.completionPolicy = completionPolicies.stream()
+                .filter(policy -> policy.mode().equalsIgnoreCase(mode))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Unknown COLLECTOR_MODE: " + mode));
         this.timeoutSeconds = timeoutSeconds;
         this.processingDelayMs = processingDelayMs;
         this.maxAttempts = maxAttempts;
         this.retryDelayMs = retryDelayMs;
         log.info("CSV collector mode={} processingDelayMs={} maxAttempts={}",
-                safeMode ? "safe" : "unsafe", processingDelayMs, maxAttempts);
+                completionPolicy.mode(), processingDelayMs, maxAttempts);
     }
 
     public CompletableFuture<CollectorProcessingResult> accept(SourceFileEvent event) {
@@ -91,11 +95,10 @@ public class EventDrivenCollector {
             fileProcessor.markInvalid(event, error);
             state.invalidFiles.incrementAndGet();
             state.lastError = error;
-            if (!safeMode) {
+            if ("unsafe".equals(completionPolicy.mode())) {
                 log.error("INTENTIONAL BUG: {} exits without latch signal", event.fileName());
-            } else {
-                signal(state);
             }
+            completionPolicy.onInvalidFile(() -> signal(state));
             return CollectorProcessingResult.completed();
         }
 
@@ -147,13 +150,7 @@ public class EventDrivenCollector {
 
     private void awaitBatch(CollectorBatchState state) {
         try {
-            boolean completed;
-            if (safeMode) {
-                completed = state.latch.await(timeoutSeconds, TimeUnit.SECONDS);
-            } else {
-                state.latch.await();
-                completed = true;
-            }
+            boolean completed = completionPolicy.awaitBatch(state.latch, timeoutSeconds);
             state.status = completed
                     ? (state.invalidFiles.get() + state.failedFiles.get() > 0
                     ? "COMPLETED_WITH_REJECTIONS" : "COMPLETED")
@@ -170,7 +167,7 @@ public class EventDrivenCollector {
     private CollectorBatchProgress progress(CollectorBatchState state) {
         boolean stuck = "RUNNING".equals(state.status) && state.latch.getCount() > 0
                 && Duration.between(state.startedAt, Instant.now()).toSeconds() >= timeoutSeconds;
-        return new CollectorBatchProgress(state.batchId, safeMode ? "safe" : "unsafe",
+        return new CollectorBatchProgress(state.batchId, completionPolicy.mode(),
                 stuck ? "STUCK" : state.status, state.expectedFiles, state.receivedEvents.get(),
                 state.successfulFiles.get(), state.invalidFiles.get(), state.failedFiles.get(),
                 state.completionSignals.get(), state.latch.getCount(), state.startedAt,

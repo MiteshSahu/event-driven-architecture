@@ -9,13 +9,14 @@ case "$command" in
     docker compose ps
     ;;
   down)
-    docker compose down
+    docker compose --profile tools --profile spark-job --profile analytics down
     ;;
   reset)
-    docker compose down --volumes --remove-orphans
+    docker compose --profile tools --profile spark-job --profile analytics \
+      down --volumes --remove-orphans
     ;;
   status)
-    docker compose ps
+    docker compose --profile tools --profile spark-job --profile analytics ps
     ;;
   logs)
     if [[ -n "${2:-}" ]]; then
@@ -31,6 +32,10 @@ case "$command" in
     ;;
   register-files)
     docker compose --profile tools run --rm --no-deps source-file-registrar
+    printf '\n'
+    ;;
+  register-happy-batch)
+    REGISTRATION_REQUEST=collector-happy-request.json docker compose --profile tools run --rm --no-deps source-file-registrar
     printf '\n'
     ;;
   register-failure-batch)
@@ -70,6 +75,44 @@ case "$command" in
     curl --fail --silent --show-error \
       http://localhost:8081/api/source-files/batches/latest/distribution
     printf '\n'
+    ;;
+  executor-stats)
+    docker compose exec -T csv-collector wget -q -O - \
+      http://localhost:8084/api/collector/executor
+    printf '\n'
+    ;;
+  build-analytics)
+    docker compose build spark-analytics airflow
+    ;;
+  build-spark)
+    docker compose build spark-analytics
+    ;;
+  run-spark)
+    docker compose run --rm spark-analytics
+    ;;
+  airflow-up)
+    docker compose build spark-analytics airflow
+    docker compose --profile analytics up -d --wait airflow
+    docker compose --profile analytics ps airflow
+    ;;
+  airflow-trigger)
+    docker compose exec -T \
+      -e PYTHONPATH=/home/airflow/.local/lib/python3.12/site-packages \
+      airflow airflow dags trigger daily_order_analytics
+    ;;
+  airflow-runs)
+    docker compose exec -T \
+      -e PYTHONPATH=/home/airflow/.local/lib/python3.12/site-packages \
+      airflow airflow dags list-runs daily_order_analytics
+    ;;
+  airflow-tasks)
+    docker compose exec -T \
+      -e PYTHONPATH=/home/airflow/.local/lib/python3.12/site-packages \
+      airflow airflow tasks list daily_order_analytics
+    ;;
+  analytics-results)
+    docker compose exec -T postgres psql -U platform -d orders -c \
+      'SELECT metric_date, status, amount_band, order_count, total_amount, average_amount, maximum_amount, unique_customers, revenue_rank FROM daily_order_metrics ORDER BY metric_date, revenue_rank, status, amount_band;'
     ;;
   crash-collector)
     docker compose kill -s SIGKILL csv-collector
@@ -119,8 +162,116 @@ case "$command" in
       sleep 2
     done
     ;;
+  scenario)
+    scenario_name="${2:-help}"
+    case "$scenario_name" in
+      happy)
+        "$0" reset
+        COLLECTOR_MODE=safe "$0" up
+        "$0" register-happy-batch
+        sleep 4
+        echo "Collector result:"
+        "$0" collector-progress
+        echo "Source-file states:"
+        "$0" source-files
+        echo "Downstream processed orders:"
+        "$0" processed
+        ;;
+      latch-unsafe)
+        "$0" reset
+        COLLECTOR_MODE=unsafe "$0" up
+        "$0" register-files
+        sleep 12
+        echo "Expected: STUCK with remainingLatchCount=1 while health is UP"
+        "$0" collector-progress
+        docker compose exec -T csv-collector wget -q -O - http://localhost:8084/actuator/health
+        printf '\n'
+        ;;
+      latch-safe)
+        "$0" reset
+        COLLECTOR_MODE=safe "$0" up
+        "$0" register-files
+        sleep 4
+        echo "Expected: COMPLETED_WITH_REJECTIONS with remainingLatchCount=0"
+        "$0" collector-progress
+        "$0" source-files
+        ;;
+      hot-partition)
+        "$0" reset
+        COLLECTOR_REPLICAS=3 COLLECTOR_MODE=safe \
+          COLLECTOR_PROCESSING_DELAY_MS=100 COLLECTOR_TIMEOUT_SECONDS=30 "$0" up
+        "$0" register-skewed-batch 60
+        sleep 1
+        echo "Kafka assignment and lag during skewed processing:"
+        "$0" collector-group
+        sleep 7
+        echo "Expected pod distribution: 60 / 0 / 0"
+        "$0" collector-distribution
+        ;;
+      balanced)
+        "$0" reset
+        COLLECTOR_REPLICAS=3 COLLECTOR_MODE=safe \
+          COLLECTOR_PROCESSING_DELAY_MS=100 COLLECTOR_TIMEOUT_SECONDS=30 "$0" up
+        "$0" register-balanced-batch 60
+        sleep 1
+        echo "Kafka assignment and lag across all partitions:"
+        "$0" collector-group
+        sleep 4
+        echo "Expected: all three pods process files"
+        "$0" collector-distribution
+        ;;
+      retry-dlt)
+        "$0" reset
+        COLLECTOR_MODE=safe "$0" up
+        "$0" register-failure-batch
+        sleep 5
+        "$0" collector-progress
+        "$0" source-files
+        "$0" dlt-messages 1
+        ;;
+      executor-unbounded)
+        "$0" reset
+        COLLECTOR_MODE=safe COLLECTOR_EXECUTOR_MODE=unbounded \
+          COLLECTOR_WORKER_THREADS=1 COLLECTOR_PROCESSING_DELAY_MS=200 \
+          COLLECTOR_TIMEOUT_SECONDS=30 "$0" up
+        "$0" register-balanced-batch 60
+        sleep 1
+        echo "Unbounded executor under load:"
+        "$0" executor-stats
+        "$0" collector-group
+        ;;
+      executor-bounded)
+        "$0" reset
+        COLLECTOR_MODE=safe COLLECTOR_EXECUTOR_MODE=bounded \
+          COLLECTOR_WORKER_THREADS=1 COLLECTOR_QUEUE_CAPACITY=1 \
+          COLLECTOR_PROCESSING_DELAY_MS=200 COLLECTOR_TIMEOUT_SECONDS=30 "$0" up
+        "$0" register-balanced-batch 60
+        sleep 1
+        echo "Bounded executor under load; callerRuns shows backpressure:"
+        "$0" executor-stats
+        "$0" collector-group
+        ;;
+      spark)
+        "$0" scenario happy
+        "$0" build-spark
+        "$0" run-spark
+        "$0" analytics-results
+        ;;
+      airflow-spark)
+        "$0" scenario happy
+        "$0" airflow-up
+        "$0" airflow-trigger
+        echo "Airflow triggered the DAG. Follow it with: ./platform logs airflow"
+        echo "After success, run: ./platform analytics-results"
+        ;;
+      *)
+        echo "Usage: ./platform scenario {happy|latch-unsafe|latch-safe|hot-partition|balanced|retry-dlt|executor-unbounded|executor-bounded|spark|airflow-spark}"
+        exit 1
+        ;;
+    esac
+    ;;
   *)
-    echo "Usage: ./platform {up|down|reset|status|logs [service]|generate [records]|register-files|register-failure-batch|register-skewed-batch [count]|register-balanced-batch [count]|collector-progress|source-files|collector-distribution|dlt-messages [count]|crash-collector|start-collector|processed|progress|consumer-groups|collector-group|watch-lag}"
+    echo "Usage: ./platform {up|down|reset|status|logs [service]|scenario [name]|generate [records]|register-files|register-happy-batch|register-failure-batch|register-skewed-batch [count]|register-balanced-batch [count]|collector-progress|source-files|collector-distribution|executor-stats|build-spark|build-analytics|run-spark|airflow-up|airflow-trigger|airflow-runs|airflow-tasks|analytics-results|dlt-messages [count]|crash-collector|start-collector|processed|progress|consumer-groups|collector-group|watch-lag}"
     exit 1
     ;;
 esac

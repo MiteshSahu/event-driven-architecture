@@ -32,3 +32,6 @@ app:
     processing-delay-ms: ${COLLECTOR_PROCESSING_DELAY_MS:0}
     max-attempts: ${COLLECTOR_MAX_ATTEMPTS:3}
     retry-delay-ms: ${COLLECTOR_RETRY_DELAY_MS:500}
+    executor-mode: ${COLLECTOR_EXECUTOR_MODE:bounded}
+    worker-threads: ${COLLECTOR_WORKER_THREADS:4}
+    queue-capacity: ${COLLECTOR_QUEUE_CAPACITY:100}

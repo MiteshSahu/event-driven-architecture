@@ -18,9 +18,13 @@ import java.util.UUID;
 @RequestMapping("/api/source-files")
 public class FileRegistrationController {
     private final JdbcTemplate jdbcTemplate;
+    private final Map<String, RoutingKeyStrategy> routingStrategies;
 
-    public FileRegistrationController(JdbcTemplate jdbcTemplate) {
+    public FileRegistrationController(JdbcTemplate jdbcTemplate,
+                                      List<RoutingKeyStrategy> routingStrategies) {
         this.jdbcTemplate = jdbcTemplate;
+        this.routingStrategies = routingStrategies.stream().collect(
+                java.util.stream.Collectors.toMap(RoutingKeyStrategy::name, strategy -> strategy));
     }
 
     @PostMapping("/batches")
@@ -32,13 +36,15 @@ public class FileRegistrationController {
         UUID batchId = UUID.randomUUID();
         int expectedCount = request.files().size();
         request.files().forEach(file -> {
-            UUID fileId = UUID.randomUUID();
+            UUID fileId = fileId();
             jdbcTemplate.update("""
                 INSERT INTO source_files
                     (id, collector_run_id, routing_key, expected_file_count,
                      file_name, file_path, status)
                 VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
-                """, fileId, batchId, fileId, expectedCount, file.fileName(), file.filePath());
+                """, fileId, batchId,
+                    routingStrategies.get("balanced").routingKey(batchId, fileId),
+                    expectedCount, file.fileName(), file.filePath());
         });
         return Map.of("batchId", batchId, "registeredFiles", expectedCount,
                 "message", "Committed to PostgreSQL; Debezium will emit the events");
@@ -52,12 +58,14 @@ public class FileRegistrationController {
         }
         UUID batchId = UUID.randomUUID();
         for (int index = 0; index < files; index++) {
+            UUID fileId = fileId();
             jdbcTemplate.update("""
                     INSERT INTO source_files
                         (id, collector_run_id, routing_key, expected_file_count,
                          file_name, file_path, status)
                     VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
-                    """, UUID.randomUUID(), batchId, batchId, files,
+                    """, fileId, batchId,
+                    routingStrategies.get("skewed").routingKey(batchId, fileId), files,
                     "550e8400-e29b-41d4-a716-446655440000-orders.csv",
                     "/data/file-batch/550e8400-e29b-41d4-a716-446655440000-orders.csv");
         }
@@ -73,18 +81,23 @@ public class FileRegistrationController {
         }
         UUID batchId = UUID.randomUUID();
         for (int index = 0; index < files; index++) {
-            UUID fileId = UUID.randomUUID();
+            UUID fileId = fileId();
             jdbcTemplate.update("""
                     INSERT INTO source_files
                         (id, collector_run_id, routing_key, expected_file_count,
                          file_name, file_path, status)
                     VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
-                    """, fileId, batchId, fileId, files,
+                    """, fileId, batchId,
+                    routingStrategies.get("balanced").routingKey(batchId, fileId), files,
                     "550e8400-e29b-41d4-a716-446655440000-orders.csv",
                     "/data/file-batch/550e8400-e29b-41d4-a716-446655440000-orders.csv");
         }
         return Map.of("batchId", batchId, "registeredFiles", files,
                 "message", "Each row has a unique routing key for Kafka partition distribution");
+    }
+
+    private UUID fileId() {
+        return UUID.randomUUID();
     }
 
     @GetMapping("/batches/{batchId}")

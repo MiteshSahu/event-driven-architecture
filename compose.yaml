@@ -142,6 +142,9 @@ services:
       COLLECTOR_CONCURRENCY: ${COLLECTOR_CONCURRENCY:-4}
       COLLECTOR_MAX_ATTEMPTS: ${COLLECTOR_MAX_ATTEMPTS:-3}
       COLLECTOR_RETRY_DELAY_MS: ${COLLECTOR_RETRY_DELAY_MS:-500}
+      COLLECTOR_EXECUTOR_MODE: ${COLLECTOR_EXECUTOR_MODE:-bounded}
+      COLLECTOR_WORKER_THREADS: ${COLLECTOR_WORKER_THREADS:-4}
+      COLLECTOR_QUEUE_CAPACITY: ${COLLECTOR_QUEUE_CAPACITY:-100}
     ports:
       - "8084"
     volumes:
@@ -209,6 +212,41 @@ services:
         --data @/data/file-batch/$${REGISTRATION_REQUEST}
         http://file-registration:8081/api/source-files/batches
 
+  spark-analytics:
+    build:
+      context: ./analytics/spark
+    profiles: ["spark-job"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow:
+    build:
+      context: ./analytics/airflow
+    profiles: ["analytics"]
+    user: "0:0"
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "admin:admin"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    command: standalone
+    ports:
+      - "8085:8080"
+    volumes:
+      - ./analytics/airflow/dags:/opt/airflow/dags:ro
+      - airflow-data:/opt/airflow
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/v2/monitor/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
 volumes:
   postgres-data:
   kafka-data:
+  airflow-data:
