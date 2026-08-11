@@ -1,0 +1,214 @@
+name: mini-data-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-orders}
+      POSTGRES_USER: ${POSTGRES_USER:-platform}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-platform}
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-platform} -d ${POSTGRES_DB:-orders}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  kafka:
+    image: apache/kafka:4.0.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LISTENERS: INTERNAL://:29092,CONTROLLER://:29093,EXTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: 4
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  connect:
+    image: quay.io/debezium/connect:3.2
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: debezium-connect
+      CONFIG_STORAGE_TOPIC: connect-configs
+      OFFSET_STORAGE_TOPIC: connect-offsets
+      STATUS_STORAGE_TOPIC: connect-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+    ports:
+      - "8083:8083"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  connector-init:
+    image: curlimages/curl:8.12.1
+    volumes:
+      - ./infrastructure/debezium/postgres-connector.json:/config/postgres-connector.json:ro
+    depends_on:
+      connect:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        curl --fail --silent --show-error \
+          -X PUT \
+          -H 'Content-Type: application/json' \
+          --data @/config/postgres-connector.json \
+          http://connect:8083/connectors/orders-postgres/config
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
+    ports:
+      - "8080:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      connect:
+        condition: service_healthy
+
+  file-registration:
+    build:
+      context: ./services/file-registration
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-orders}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-platform}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-platform}
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8081/actuator/health | grep -q UP"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  csv-collector:
+    build:
+      context: ./services/csv-collector
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-orders}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-platform}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-platform}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      COLLECTOR_MODE: ${COLLECTOR_MODE:-safe}
+      COLLECTOR_TIMEOUT_SECONDS: ${COLLECTOR_TIMEOUT_SECONDS:-10}
+      COLLECTOR_PROCESSING_DELAY_MS: ${COLLECTOR_PROCESSING_DELAY_MS:-0}
+      COLLECTOR_CONCURRENCY: ${COLLECTOR_CONCURRENCY:-4}
+      COLLECTOR_MAX_ATTEMPTS: ${COLLECTOR_MAX_ATTEMPTS:-3}
+      COLLECTOR_RETRY_DELAY_MS: ${COLLECTOR_RETRY_DELAY_MS:-500}
+    ports:
+      - "8084"
+    volumes:
+      - ./data:/data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      connector-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8084/actuator/health | grep -q UP"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  order-processor:
+    build:
+      context: ./services/order-processor
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-orders}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-platform}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-platform}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      PROCESSING_DELAY_MS: ${PROCESSING_DELAY_MS:-25}
+      CONSUMER_CONCURRENCY: ${CONSUMER_CONCURRENCY:-1}
+      PROCESSING_MODE: ${PROCESSING_MODE:-safe-partition}
+      UNSAFE_SKIP_AFTER_SEQUENCE: ${UNSAFE_SKIP_AFTER_SEQUENCE:-49}
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      connector-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8082/actuator/health | grep -q UP"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  load-generator:
+    build:
+      context: ./tools/load-generator
+    profiles: ["tools"]
+    volumes:
+      - ./data:/data
+
+  source-file-registrar:
+    image: curlimages/curl:8.12.1
+    profiles: ["tools"]
+    environment:
+      REGISTRATION_REQUEST: ${REGISTRATION_REQUEST:-collector-request.json}
+    volumes:
+      - ./data:/data:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        curl --fail --silent --show-error
+        -X POST
+        -H 'Content-Type: application/json'
+        --data @/data/file-batch/$${REGISTRATION_REQUEST}
+        http://file-registration:8081/api/source-files/batches
+
+volumes:
+  postgres-data:
+  kafka-data:

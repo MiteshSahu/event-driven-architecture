@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command="${1:-help}"
+
+case "$command" in
+  up)
+    docker compose up --build -d --wait --scale csv-collector="${COLLECTOR_REPLICAS:-1}"
+    docker compose ps
+    ;;
+  down)
+    docker compose down
+    ;;
+  reset)
+    docker compose down --volumes --remove-orphans
+    ;;
+  status)
+    docker compose ps
+    ;;
+  logs)
+    if [[ -n "${2:-}" ]]; then
+      docker compose logs -f "$2"
+    else
+      docker compose logs -f
+    fi
+    ;;
+  generate)
+    record_count="${2:-1000}"
+    docker compose --profile tools run --rm --no-deps load-generator \
+      --records "$record_count"
+    ;;
+  register-files)
+    docker compose --profile tools run --rm --no-deps source-file-registrar
+    printf '\n'
+    ;;
+  register-failure-batch)
+    REGISTRATION_REQUEST=collector-failure-request.json docker compose --profile tools run --rm --no-deps source-file-registrar
+    printf '\n'
+    ;;
+  dlt-messages)
+    docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
+      --bootstrap-server kafka:29092 \
+      --topic source-files.DLT \
+      --from-beginning \
+      --max-messages "${2:-1}" \
+      --timeout-ms 10000
+    ;;
+  register-skewed-batch)
+    file_count="${2:-60}"
+    curl --fail --silent --show-error -X POST \
+      "http://localhost:8081/api/source-files/batches/skewed?files=$file_count"
+    printf '\n'
+    ;;
+  register-balanced-batch)
+    file_count="${2:-60}"
+    curl --fail --silent --show-error -X POST \
+      "http://localhost:8081/api/source-files/batches/balanced?files=$file_count"
+    printf '\n'
+    ;;
+  collector-progress)
+    docker compose exec -T csv-collector wget -q -O - \
+      http://localhost:8084/api/collector/batches/latest
+    printf '\n'
+    ;;
+  source-files)
+    curl --fail --silent --show-error http://localhost:8081/api/source-files/batches/latest
+    printf '\n'
+    ;;
+  collector-distribution)
+    curl --fail --silent --show-error \
+      http://localhost:8081/api/source-files/batches/latest/distribution
+    printf '\n'
+    ;;
+  crash-collector)
+    docker compose kill -s SIGKILL csv-collector
+    ;;
+  start-collector)
+    docker compose start csv-collector
+    ;;
+  processed)
+    curl --fail --silent --show-error http://localhost:8082/api/processed-orders
+    printf '\n'
+    ;;
+  progress)
+    curl --fail --silent --show-error http://localhost:8082/api/consumer-progress
+    printf '\n'
+    ;;
+  consumer-groups)
+    for attempt in {1..30}; do
+      if docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+        --bootstrap-server kafka:29092 \
+        --describe \
+        --group order-processors 2>/dev/null; then
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "Consumer group 'order-processors' did not register within 30 seconds." >&2
+    echo "Check it with: ./platform logs order-processor" >&2
+    exit 1
+    ;;
+  collector-group)
+    for attempt in {1..30}; do
+      if docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+        --bootstrap-server kafka:29092 \
+        --describe \
+        --group csv-collectors 2>/dev/null; then
+        exit 0
+      fi
+      sleep 1
+    done
+    echo "Consumer group 'csv-collectors' did not register within 30 seconds." >&2
+    exit 1
+    ;;
+  watch-lag)
+    while true; do
+      date '+%H:%M:%S'
+      "$0" consumer-groups
+      sleep 2
+    done
+    ;;
+  *)
+    echo "Usage: ./platform {up|down|reset|status|logs [service]|generate [records]|register-files|register-failure-batch|register-skewed-batch [count]|register-balanced-batch [count]|collector-progress|source-files|collector-distribution|dlt-messages [count]|crash-collector|start-collector|processed|progress|consumer-groups|collector-group|watch-lag}"
+    exit 1
+    ;;
+esac

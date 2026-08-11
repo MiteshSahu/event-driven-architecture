@@ -1,0 +1,20 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "database.hostname": "postgres",
+  "database.port": "5432",
+  "database.user": "platform",
+  "database.password": "platform",
+  "database.dbname": "orders",
+  "topic.prefix": "orders-cdc",
+  "plugin.name": "pgoutput",
+  "slot.name": "orders_cdc_slot",
+  "publication.autocreate.mode": "filtered",
+  "table.include.list": "public.source_files,public.orders",
+  "message.key.columns": "public.source_files:routing_key",
+  "snapshot.mode": "initial",
+  "decimal.handling.mode": "string",
+  "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "key.converter.schemas.enable": "false",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false"
+}

@@ -1,0 +1,12 @@
+{
+  "files": [
+    {
+      "fileName": "550e8400-e29b-41d4-a716-446655440000-orders.csv",
+      "filePath": "/data/file-batch/550e8400-e29b-41d4-a716-446655440000-orders.csv"
+    },
+    {
+      "fileName": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-missing.csv",
+      "filePath": "/data/file-batch/does-not-exist.csv"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+orderId,customerId,productId,amount,status,eventTime
+order-1001,customer-101,product-1,499.00,CREATED,2026-08-11T10:00:00Z
+order-1002,customer-102,product-2,1299.50,CREATED,2026-08-11T10:01:00Z
+order-1003,customer-101,product-3,250.00,CREATED,2026-08-11T10:02:00Z
+

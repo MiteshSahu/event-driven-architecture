@@ -1,0 +1,47 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: order-processor
+  datasource:
+    url: jdbc:postgresql://localhost:5432/orders
+    username: platform
+    password: platform
+    hikari:
+      maximum-pool-size: 5
+  sql:
+    init:
+      mode: always
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: order-processors
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      max-poll-records: 50
+    listener:
+      ack-mode: manual_immediate
+      concurrency: ${CONSUMER_CONCURRENCY:1}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+logging:
+  level:
+    dev.learning.platform: INFO
+
+app:
+  processing:
+    delay-ms: ${PROCESSING_DELAY_MS:25}
+    mode: ${PROCESSING_MODE:safe-partition}
+    unsafe-skip-after-sequence: ${UNSAFE_SKIP_AFTER_SEQUENCE:49}
